@@ -129,13 +129,17 @@ def main(argv: list[str] | None = None) -> int:
             changed += 1
             continue
 
-        # Back up whatever is there before replacing it.
+        # Back up whatever is there before replacing it. The backup MUST live
+        # outside the plugins/ directory: the loader treats any directory holding
+        # a plugin.yaml as a plugin, so a sibling "<name>-backup" shows up as a
+        # second plugin with the old version and description.
         if have:
-            backup = dst.with_name(f"{PLUGIN_NAME}-{stamp}-backup")
+            backup = dst.parent.parent / "backups" / f"{PLUGIN_NAME}-{stamp}"
+            backup.parent.mkdir(parents=True, exist_ok=True)
             if backup.exists():
                 shutil.rmtree(backup)
             shutil.copytree(dst, backup)
-            note = f"backup: {backup.name}"
+            note = f"backup: backups/{backup.name}"
         else:
             note = "new install"
 

@@ -249,8 +249,12 @@ python scripts/sync_profiles.py --apply        # copy, with a timestamped backup
 python scripts/sync_profiles.py --apply --install   # also add it to profiles lacking it
 ```
 
-It backs up whatever was there as `<plugin>-<timestamp>-backup` before replacing
-it, so a bad update is one `mv` away from being undone.
+It backs up whatever was there to `<profile>/backups/<plugin>-<timestamp>` before
+replacing it, so a bad update is one `mv` away from being undone.
+
+> The backup deliberately lives **outside** `plugins/`. Hermes treats any directory
+> containing a `plugin.yaml` as a plugin, so a `<name>-backup` sitting next to the real
+> one is listed as a second plugin carrying the *old* version and description.
 
 ### Then restart the bot
 

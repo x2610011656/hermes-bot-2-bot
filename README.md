@@ -89,6 +89,7 @@ Restart the gateway (or start a new session) and the tools register.
 
 ```bash
 hermes plugins validate "$HERMES_HOME/plugins/bot-to-bot"
+python -m unittest discover -s tests -v      # 47 pure-logic tests
 ```
 
 Then, in a chat:
@@ -101,6 +102,16 @@ You should see every profile on the machine.
 
 ## Tools
 
+| Tool | Purpose |
+|---|---|
+| `b2b_call` | message one or more bots, on a chosen lane |
+| `b2b_list` | the roster, with live state and capability cards |
+| `b2b_send` | deliver **as** a bot, on its own token, to a channel |
+| `b2b_status` | read a delivery's lifecycle state |
+| `b2b_cancel` | cancel a delivery that has not yet settled |
+| `b2b_card` | read/write a bot's capability card |
+| `b2b_policy` | show the resolved guardrails |
+
 ### `b2b_call` — message bots
 
 | Arg | Type | Notes |
@@ -108,6 +119,8 @@ You should see every profile on the machine.
 | `target` | string | A bot name, `"bravo, marnie"` for several, or `"*"` / `"all"` for the fleet |
 | `message` | string | What to send (max 16 000 chars) |
 | `mode` | `"async"` \| `"wait"` | Default `async`. See below. |
+| `session` | `"bot"` \| `"new"` \| `"existing"` | **Default `bot`** — the target's canonical Bot Chat. Opt in to a different session only when you mean it. |
+| `session_name` | string | Session title for `session="new"` or `session="existing"` |
 
 **`mode="async"` (default)** — fire-and-forget. Hands the message to a tracked background
 process and returns a `queued` acknowledgement immediately. The recipient's reply arrives later
@@ -121,52 +134,105 @@ receive an async completion: cron jobs, one-shot CLI runs, the API server.
 > session reports `notify_on_complete: false`, it cannot receive async replies — re-issue with
 > `mode="wait"`.
 
-### `b2b_list` — who can I reach?
-
-Lists every profile on the machine with its friendly name and whether its canonical Bot Chat is
-currently held open by a live session.
-
 ### `b2b_send` — send *as* a bot
-
-Sends a message from a specific bot's own profile and credentials to a channel:
 
 ```
 b2b_send(target="bravo", channel="telegram:123456789", message="hello")
 ```
 
----
+### `b2b_status` / `b2b_cancel` — the task lifecycle
+
+Every delivery is a durable task. The states mirror A2A's and the mailbox's own:
+
+```
+queued ──► claimed ──► settled
+   │          │    └─► failed
+   └──────────┴──────► cancelled
+```
+
+Receipts are permanent and survive a crash; a crashed consumer leaves an inspectable unknown
+outcome rather than permission to re-run the input. `b2b_status` reads one task by id (or a
+bot's recent ones); `b2b_cancel` cancels a task that has not yet settled.
+
+### `b2b_card` — capability cards
+
+A bot declares itself in `<profile>/b2b-card.json` — A2A's Agent Card, downscaled:
+
+```json
+{
+  "name": "marnie",
+  "description": "diary, journal, and dream-journal keeper",
+  "lanes": ["bot", "new"],
+  "capabilities": ["notion-write", "journal-capture"]
+}
+```
+
+**No card means every lane is accepted.** Declaring `lanes` turns the card into a gate: a
+delivery on a lane the bot did not declare is refused, and the refusal names what it does
+accept.
+
+### `b2b_policy` — guardrails
+
+Policy lives in `<hermes-home>/b2b-policy.json` (optional; absent = permissive):
+
+```json
+{
+  "allowed_targets": ["marnie", "jefferson"],
+  "denied_targets": ["vinny"],
+  "allowed_lanes": ["bot", "existing"],
+  "max_message_chars": 16000,
+  "allow_fanout": true
+}
+```
+
+`denied_targets` always wins. A hard ceiling of 64 000 chars cannot be raised by policy.
+**A refused call spawns nothing** — every gate runs before any delivery.
 
 ## How it works
 
-Two delivery lanes, tried in order:
+Each module owns exactly one concern; nothing else does that job.
 
-**1. Live owner.** If the target's canonical Bot Chat is open somewhere (Desktop, another
-terminal), the message is handed to that live session through Hermes' own owner-pinned mailbox
-(`tools.bot_live_delivery`) — the same mechanism `message_agent` uses. **No new session.**
+```
+b2b/model.py      vocabulary — Message, Task, TaskState, AgentCard, Lane, errors
+b2b/guard.py      guardrails — size cap, allowed/denied targets, allowed lanes
+b2b/ledger.py     TaskStore — the durable task lifecycle
+b2b/transport.py  delivery — the live-owner lane and the named-session lane
+b2b/roster.py     discovery — who exists, what they declare, what is live
+b2b/cards.py      AgentCard read/write
+b2b/service.py    the service — lane choice, fan-out, the card gate
+b2b/tools.py      tool schemas + handlers (thin adapters only)
+```
 
-**2. Canonical Bot Chat relay.** If no live owner is present, the message is delivered into the
-target's canonical `Bot Chat` via a one-shot CLI turn — the same argv Bot Mode itself runs. The
-title is the fixed canonical `"Bot Chat"`, so every delivery lands in the *same* forever-chat
-thread. **No new session.**
+`__init__.py` is a shim: it imports the tool table and registers it.
 
-The roster is discovered from disk (`<hermes-home>/profiles/`), not hardcoded. Create a profile
-and it appears; delete one and it stops appearing.
+### Lanes
 
----
+| `session=` | Reaches | Works on |
+|---|---|---|
+| `bot` *(default)* | the target's canonical Bot Chat | every surface |
+| `new` | a fresh session (named, or timestamped) | every surface |
+| `existing` | a pre-existing session — the live one if open, else the named one | live lane: desktop/TUI only |
 
-## Design notes
+On the default lane the service **prefers a live owner when one exists**. That matters: the
+mailbox correlates each reply to its delivery id, so a reply can never be mistaken for another
+turn's. A CLI turn into a session that is already live would interleave with that session's
+queue and return an uncorrelated answer, so the CLI path is the *fallback* — for bots with no
+live session, such as Telegram-gateway bots.
 
-- **No new sessions.** Both lanes target the canonical Bot Chat. Nothing here mints a scratch
-  session per message.
+### Design notes
+
+- **The default lane is the Bot Chat.** A caller who says nothing about sessions gets the
+  canonical Bot Chat. Nothing here mints a scratch session unless asked.
 - **Roster is derived.** The plugin scans `<hermes-home>/profiles/` and accepts any directory
-  carrying a `config.yaml` or `profile.yaml`. No bot names exist in the code.
-- **5-second roster cache.** Repeat calls skip the filesystem scan. A profile created in the last
-  5 seconds may not appear yet.
+  carrying a `config.yaml` or `profile.yaml`. No bot names exist in the code — a test enforces
+  this by walking the AST.
+- **5-second roster cache.** Repeat calls skip the filesystem scan.
 - **Graceful degradation.** The launcher path resolves through Hermes' own private resolver when
-  available, then falls back to the published `hermes` binary, then `PATH`. If a future Hermes
-  release moves the private function, this plugin keeps working instead of crashing.
+  available, then falls back to the published `hermes` binary, then `PATH`.
 - **Structured errors.** Failures return `{"error", "reason", "meaning"}` with a stable reason
-  code (`bad_target`, `bad_message`, `spawn_failed`, `async_unsupported`).
+  code (`bad_target`, `bad_message`, `bad_lane`, `bad_session`, `no_live_owner`, `too_large`,
+  `denied`, `lane_unsupported`, `spawn_failed`, `async_unsupported`, `not_found`,
+  `not_cancellable`).
 
 ## Known limitations
 
@@ -180,6 +246,11 @@ and it appears; delete one and it stops appearing.
   The launcher lookup degrades safely; the lanes themselves would need updating if those modules
   move.
 - **Fan-out is sequential.** Messaging N bots takes N delivery attempts in sequence.
+- **The live lane is desktop/TUI only.** The poller that consumes mailbox deliveries runs in
+  `tui_gateway.session_notifications`. A Telegram-gateway bot has no live owner, so it takes
+  the CLI fallback on the default lane.
+- **A live Bot Chat can be mid-turn.** A blocking `mode="wait"` call may have to wait for the
+  session's current turn to finish before yours is claimed.
 - **First call in a fresh session may miss the tool.** Hermes defers newly-registered plugin
   tools; the first turn or two in a brand-new session may not see them, after which they are
   present.

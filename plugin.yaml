@@ -1,15 +1,23 @@
 name: bot-to-bot
-version: 1.0.0
+version: 2.0.0
 description: >-
   Bot-to-Bot (B2B): message any bot on this install from ANY session — regular
-  Sessions mode included — without creating new sessions. Fire-and-forget by
-  default (the reply returns later as a completion notification, like Bot
-  Mode's message_agent); mode='wait' blocks for the reply on cron/one-shot
-  surfaces. Each message lands in the target's canonical Bot Chat, reusing the
-  same delivery plane Bot Mode uses. Tools: b2b_call (message a bot, get reply),
-  b2b_list (list reachable bots), b2b_send (send AS a bot to a channel).
+  Sessions mode included — without entering Bot Mode. A downscaled A2A
+  architecture, all local. Default lane is the target's canonical Bot Chat
+  (opt in to a new or pre-existing session with session='new'/'existing').
+  Fire-and-forget by default; the reply returns later as a completion
+  notification. Deliveries are durable tasks with a real lifecycle
+  (queued -> claimed -> settled/failed/cancelled) you can inspect and cancel.
+  Bots may declare a capability card (what they do, which lanes they accept).
+  Guardrails (allowed/denied targets, lanes, size cap) are policy-driven and
+  fail closed. Tools: b2b_call, b2b_list, b2b_send, b2b_status, b2b_cancel,
+  b2b_card, b2b_policy.
 author: Andrew Supit
 provides_tools:
   - b2b_call
   - b2b_list
   - b2b_send
+  - b2b_status
+  - b2b_cancel
+  - b2b_card
+  - b2b_policy

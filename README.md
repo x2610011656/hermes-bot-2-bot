@@ -186,6 +186,58 @@ and it appears; delete one and it stops appearing.
 
 ---
 
+## Troubleshooting
+
+### "There's no `b2b_call` tool in this session"
+
+By far the most common report. The plugin is installed, but its tools appear **per profile**, and
+enablement is per-profile state. Check both:
+
+```bash
+# 1. Is the plugin installed at all?
+hermes plugins list | grep bot-to-bot
+
+# 2. Is it enabled for THIS profile?
+hermes -p <profile> plugins list | grep bot-to-bot
+```
+
+If step 2 shows `not enabled`, run:
+
+```bash
+hermes -p <profile> plugins enable bot-to-bot
+```
+
+Then **start a new session** in that profile — the toolset list is read at session start.
+
+### The bot still says it has no `b2b_call` after enabling
+
+Hermes **defers** newly-registered plugin tools. The very first turn or two in a brand-new
+session may not see them, after which they are present. Ask again in a later turn before
+concluding anything is broken.
+
+### A different profile can't be reached even though it's listed
+
+The roster (who exists) and enablement (who has the tools) are separate:
+
+- **Roster** is discovered from disk automatically — any profile in `<hermes-home>/profiles/`.
+- **Enablement** is manual, per profile.
+
+So bot A can *see* bot B in `b2b_list` while bot B has no tools of its own. That is expected.
+Enable the plugin in B too if B should be able to initiate messages.
+
+### `notify_on_complete: false` in the result
+
+That session cannot receive an async completion — cron jobs, one-shot CLI runs, and API-server
+sessions are the usual causes. Re-issue the call with `mode="wait"` to block for the reply
+instead.
+
+### Delivery fails with "could not reach the Bot Chat"
+
+The target's canonical Bot Chat is held open by another surface and no live-owner handoff was
+available. Retry later, or close that Bot Chat tab.
+
+---
+
 ## Uninstall
 
 ```bash

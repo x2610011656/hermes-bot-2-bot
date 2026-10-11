@@ -234,6 +234,34 @@ live session, such as Telegram-gateway bots.
   `denied`, `lane_unsupported`, `spawn_failed`, `async_unsupported`, `not_found`,
   `not_cancellable`).
 
+## Updating every bot (plugins are per-profile)
+
+**There is no shared install and no automatic propagation.** Each profile keeps
+its own copy of the plugin files under `<profile>/plugins/bot-to-bot/`. Updating
+the default profile does **not** update the other bots — you must copy the files
+into each one.
+
+The plugin ships a script for exactly this. The default profile is the source:
+
+```bash
+python scripts/sync_profiles.py                # report only — shows who is behind
+python scripts/sync_profiles.py --apply        # copy, with a timestamped backup each
+python scripts/sync_profiles.py --apply --install   # also add it to profiles lacking it
+```
+
+It backs up whatever was there as `<plugin>-<timestamp>-backup` before replacing
+it, so a bad update is one `mv` away from being undone.
+
+### Then restart the bot
+
+**A running bot keeps the code it loaded at startup.** Copying the files does not
+affect a process that is already running — restart it (or start a new session in
+that profile) to pick up the new version. Verify with:
+
+```bash
+hermes -p <profile> plugins list | grep bot-to-bot
+```
+
 ## Known limitations
 
 - **Same machine only.** Bots on other hosts are not reachable. Bot Mode's peer/Desktop relay is

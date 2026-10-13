@@ -158,34 +158,72 @@ def spawn_named(pid: str, title: str, message: str,
     return parsed
 
 
-def ack(pid: str, title: str, task_id: str, proc_id: str = "") -> str:
-    """The fire-and-forget acknowledgement — explicitly not a delivery receipt."""
+def ack(pid: str, title: str, *, delivery_id: str = "", spawn: Optional[dict] = None) -> str:
+    """The fire-and-forget acknowledgement.
+
+    Two shapes, honestly distinguished:
+
+    - ``delivery_id`` (live-owner lane): a real durable mailbox receipt exists
+      and is retrievable via b2b_status(delivery_id=...).
+    - ``spawn`` (named-session lane, for no-live-owner bots like Telegram
+      gateways): there is no mailbox owner to settle a receipt, so there is no
+      delivery id. The real, inspectable handle is the background ``process_id``.
+
+    The old code minted a fresh Task.new_id() on the named lane that was never
+    written anywhere, so b2b_status could only ever report it not_found. Now each
+    shape returns the handle that actually exists and says which it is.
+    """
+    if delivery_id:
+        return json.dumps({
+            "status": "queued",
+            "to": pid,
+            "session": title,
+            "delivery_id": delivery_id,
+            "durable_receipt": True,
+            "queued_at": int(time.time()),
+            "detail": (
+                f"Message queued for {pid} in '{title}': a durable receipt exists. "
+                f"Do NOT wait or poll; the reply arrives as the completion "
+                f"notification. Track it with b2b_status(delivery_id='{delivery_id}')."
+            ),
+        })
+
+    spawn = spawn or {}
+    proc_id = str(spawn.get("process_id") or spawn.get("session_id") or "")
     return json.dumps({
         "status": "queued",
         "to": pid,
         "session": title,
-        "delivery_id": task_id,
         "process_id": proc_id,
         "queued_at": int(time.time()),
+        "durable_receipt": False,
         "detail": (
-            f"Message queued for {pid} in '{title}': this acknowledges the hand-off to a "
-            f"background delivery process, not a delivery receipt — do NOT wait or poll. "
-            f"Finish your turn; the completion notification carries the reply (relay it, "
-            f"attributed to {pid}) or the delivery failure."
+            f"Message queued for {pid} in '{title}': this hands the turn to a "
+            f"background delivery process (no live owner to settle a mailbox "
+            f"receipt, so there is no delivery id). Do NOT wait or poll; the reply "
+            f"arrives as the completion notification for process "
+            f"{proc_id or '(pending)'}. Inspect via the process id, not b2b_status."
         ),
     })
 
 
 # ── outbound as a bot ────────────────────────────────────────────────────────
 
-def run_as(pid: str, channel: str, message: str,
-           timeout: int = 120) -> tuple[bool, str]:
+def run_as(pid: str, channel: str, message: str, *,
+           sender: str = "", timeout: int = 120) -> tuple[bool, str]:
     """Deliver a message AS a bot — its own profile and token, to a channel.
 
     ``-p <profile>`` is what makes it send as THAT bot; without it, ``hermes
     send`` would use the active profile's token instead.
+
+    ``sender`` is the profile that actually triggered the send. It is threaded
+    through from the tool call (never derived from ambient process state), and
+    when present the subject states BOTH the trigger and the sending bot — so a
+    message can never be mislabeled as originating from the bot it merely rode
+    out on. Falls back to a neutral subject when the sender is unknown.
     """
-    cmd = [hermes_cli(), "-p", pid, "send", "--to", channel, "-s", f"b2b from {pid}", message]
+    subject = f"b2b: {sender} via {pid}" if sender else f"b2b via {pid}"
+    cmd = [hermes_cli(), "-p", pid, "send", "--to", channel, "-s", subject, message]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
                               encoding="utf-8", errors="replace")

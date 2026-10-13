@@ -19,7 +19,7 @@ from typing import Iterable, Optional
 from . import cards, guard, roster, transport
 from .ledger import TaskStore
 from .model import (DEFAULT_LANE, Author, B2BError, Lane, MEANINGS, Reason,
-                    Task, err)
+                    err)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,7 @@ def _resolve_targets(raw: str, policy: guard.Policy) -> list[str]:
     known = roster.roster()
     me = roster.self_profile()
 
+    # Fan-out to every bot except self (never message yourself in a broadcast).
     if raw.strip().lower() in ("*", "all"):
         pids = [p for p in sorted(known) if p != me]
         if not pids:
@@ -44,6 +45,9 @@ def _resolve_targets(raw: str, policy: guard.Policy) -> list[str]:
             policy.check_target(pid)
         return pids
 
+    # Explicitly named targets — a profile id, display name, or title. Self is
+    # allowed here on purpose: naming 'default' explicitly is a deliberate
+    # reach, not a loop. Only fan-out above excludes self.
     pids: list[str] = []
     for part in raw.split(","):
         pid = roster.resolve(part)
@@ -52,7 +56,7 @@ def _resolve_targets(raw: str, policy: guard.Policy) -> list[str]:
                 Reason.BAD_TARGET,
                 f"No bot named '{part.strip()}'. Known: {', '.join(sorted(known))}",
             )
-        if pid != me and pid not in pids:
+        if pid not in pids:
             pids.append(pid)
     if not pids:
         raise B2BError(Reason.BAD_TARGET, "No targets after resolving the roster.")
@@ -77,11 +81,13 @@ def _apply_cards(pids: Iterable[str], lane: Lane) -> tuple[list[str], list[str]]
 # ── the call ─────────────────────────────────────────────────────────────────
 
 def call(*, target: str, message: str, lane: Lane = DEFAULT_LANE,
-         session_name: str = "", wait: bool = False,
+         session_name: str = "", sender: str = "", wait: bool = False,
          policy: Optional[guard.Policy] = None) -> str:
     """Message one or more bots and return the caller-facing result.
 
     The lane decides the mechanism; everything else is the same on every lane.
+    ``sender`` is the real originating profile, threaded from the tool call so
+    attribution never falls back to the multiplexer's shared 'default' mask.
     Failures are per-target, so one unreachable bot does not lose the others.
     """
     policy = policy or guard.load(roster.hermes_home())
@@ -98,7 +104,7 @@ def call(*, target: str, message: str, lane: Lane = DEFAULT_LANE,
             f"No target accepts session='{lane.value}'. Declined by: {'; '.join(declined)}",
         )
 
-    signed = _sign(pids, message)
+    signed = _sign(pids, message, sender)
     out = [_one(pid, signed, lane, session_name, wait, policy) for pid in pids]
     if declined:
         out.append(err(Reason.LANE_UNSUPPORTED,
@@ -106,11 +112,17 @@ def call(*, target: str, message: str, lane: Lane = DEFAULT_LANE,
     return "\n\n".join(out)
 
 
-def _sign(pids: list[str], message: str) -> str:
+def _sign(pids: list[str], message: str, sender: str = "") -> str:
     """Attribution prefix so recipients know who is talking (parity with
-    Bot Mode's ``message_agent``)."""
-    me = roster.self_profile()
-    return f"Message from 🤖 {me} (@{me}) → {', '.join(pids)}: {message}"
+    Bot Mode's ``message_agent``).
+
+    ``sender`` is threaded from the call. When it is empty (unknown under the
+    multiplexer), the prefix states the message is from an unnamed local bot
+    rather than asserting a wrong identity — a wrong "from" is worse than an
+    honest "unnamed".
+    """
+    who = f"{sender} (@{sender})" if sender else "a local bot"
+    return f"Message from 🤖 {who} → {', '.join(pids)}: {message}"
 
 
 def _one(pid: str, message: str, lane: Lane, session_name: str,
@@ -156,7 +168,8 @@ def _via_live(pid: str, owner: dict, message: str, wait: bool = True) -> str:
         return exc.to_json()
 
     if not wait:
-        return transport.ack(pid, _session_label(pid, owner), task_id)
+        return transport.ack(pid, _session_label(pid, owner),
+                             delivery_id=task_id)
 
     try:
         task = transport.wait_live(pid, task_id, transport.LIVE_WAIT_SECONDS)
@@ -181,7 +194,15 @@ def _session_label(pid: str, owner: dict) -> str:
 
 def _via_named(pid: str, title: str, message: str, wait: bool,
                policy: guard.Policy) -> str:
-    """Named-session lane: block for the reply, or hand it to a background process."""
+    """Named-session lane: block for the reply, or hand it to a background process.
+
+    The async path hands the turn to a tracked background process. This lane is
+    for targets with no live owner (e.g. Telegram-gateway bots), so there is no
+    mailbox owner to admit a durable receipt to — the durable handle IS the
+    background process id, and the ack says so instead of implying a receipt
+    exists (the old code minted a fresh Task.new_id() that was never written
+    anywhere, so b2b_status could only ever report it not_found).
+    """
     if wait:
         ok, out = transport.run_named(pid, title, message)
         if ok:
@@ -192,7 +213,7 @@ def _via_named(pid: str, title: str, message: str, wait: bool,
         parsed = transport.spawn_named(pid, title, message, policy.max_message_chars)
     except B2BError as exc:
         return exc.to_json()
-    return transport.ack(pid, title, Task.new_id(), parsed.get("session_id") or "")
+    return transport.ack(pid, title, spawn=parsed)
 
 
 def _stamp() -> str:
@@ -258,15 +279,19 @@ def cancel(*, delivery_id: str, target: str = "") -> str:
     raise B2BError(Reason.NOT_FOUND, f"No delivery receipt '{delivery_id}' on any profile.")
 
 
-def send_as(*, target: str, channel: str, message: str) -> str:
-    """Deliver AS a bot (its own profile and token) to a channel."""
+def send_as(*, target: str, channel: str, message: str, sender: str = "") -> str:
+    """Deliver AS a bot (its own profile and token) to a channel.
+
+    ``sender`` is the profile that triggered the send, threaded from the tool
+    call so attribution reflects the real origin, not ambient process state.
+    """
     if not (target and channel and message):
         raise B2BError(Reason.BAD_MESSAGE,
                        "'target', 'channel', and 'message' are all required.")
     pid = roster.resolve(target)
     if not pid:
         raise B2BError(Reason.BAD_TARGET, f"No bot named '{target}'.")
-    ok, out = transport.run_as(pid, channel, message)
+    ok, out = transport.run_as(pid, channel, message, sender=sender)
     if ok:
-        return f"[b2b send as {pid} → {channel}]\n{out or 'sent.'}"
+        return f"[b2b send as {pid} → {channel}]{f' (triggered by {sender})' if sender else ''}\n{out or 'sent.'}"
     raise B2BError(Reason.SPAWN_FAILED, f"Send as '{pid}' failed — {out}")

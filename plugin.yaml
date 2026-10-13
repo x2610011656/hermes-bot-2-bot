@@ -1,17 +1,20 @@
 name: bot-to-bot
-version: 2.0.0
+version: 2.1.0
 description: >-
   Bot-to-Bot (B2B): message any bot on this install from ANY session — regular
   Sessions mode included — without entering Bot Mode. A downscaled A2A
   architecture, all local. Default lane is the target's canonical Bot Chat
   (opt in to a new or pre-existing session with session='new'/'existing').
   Fire-and-forget by default; the reply returns later as a completion
-  notification. Deliveries are durable tasks with a real lifecycle
-  (queued -> claimed -> settled/failed/cancelled) you can inspect and cancel.
-  Bots may declare a capability card (what they do, which lanes they accept).
-  Guardrails (allowed/denied targets, lanes, size cap) are policy-driven and
-  fail closed. Tools: b2b_call, b2b_list, b2b_send, b2b_status, b2b_cancel,
-  b2b_card, b2b_policy.
+  notification. Deliveries carry honest handles: a real durable delivery_id
+  on the live lane, or the background process id where no live owner exists
+  (no fabricated ids). Sender attribution is threaded explicitly via the
+  'sender' argument so a message is never mislabeled as coming from the
+  shared-gateway 'default'; when the sender is unknown it is labeled
+  'a local bot' rather than falsely attributed. Bots may declare a capability
+  card (what they do, which lanes they accept). Guardrails (allowed/denied
+  targets, lanes, size cap) are policy-driven and fail closed. Tools:
+  b2b_call, b2b_list, b2b_send, b2b_status, b2b_cancel, b2b_card, b2b_policy.
 author: Andrew Supit
 provides_tools:
   - b2b_call

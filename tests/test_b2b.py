@@ -142,19 +142,25 @@ class TestResolve(unittest.TestCase):
 
 
 class TestSign(unittest.TestCase):
-    """Messages carry sender attribution."""
+    """Messages carry sender attribution — threaded, never ambient-derived."""
 
-    def test_signature_shape(self):
-        with mock.patch.object(roster, "self_profile", return_value="default"):
-            out = service._sign(["bravo"], "hello")
-        for token in ("default", "bravo", "hello"):
+    def test_explicit_sender_is_used(self):
+        out = service._sign(["bravo"], "hello", sender="marnie")
+        for token in ("marnie", "bravo", "hello"):
             self.assertIn(token, out)
 
-    def test_multiple_targets(self):
-        with mock.patch.object(roster, "self_profile", return_value="default"):
-            out = service._sign(["bravo", "marnie"], "hi")
+    def test_unknown_sender_is_unnamed_not_false(self):
+        # The fix for the misattribution bug: when the sender is unknown (the
+        # multiplexer mask), the prefix must NOT assert a wrong identity.
+        out = service._sign(["bravo"], "hello", sender="")
+        self.assertNotIn("default", out)          # never claim 'default' falsely
+        self.assertIn("local bot", out)           # honest 'unnamed' instead
         self.assertIn("bravo", out)
-        self.assertIn("marnie", out)
+
+    def test_multiple_targets(self):
+        out = service._sign(["bravo", "marnie"], "hi", sender="jefferson")
+        for token in ("bravo", "marnie", "jefferson"):
+            self.assertIn(token, out)
 
 
 class TestCallValidation(unittest.TestCase):
@@ -186,12 +192,31 @@ class TestCallValidation(unittest.TestCase):
         self.assertIn("bad_target", out)
         self.assertIn("alpha", out)      # known bots listed to help the caller
 
-    def test_cannot_message_self(self):
+    def test_can_message_default_when_explicitly_named(self):
+        # Regression for the real failure: the caller IS 'default' (the process
+        # runs under the default profile home) and explicitly targets 'default'.
+        # The old self-guard dropped pid==me unconditionally, so an explicitly
+        # named 'default' returned bad_target — unreachable, exactly as reported.
+        # Fan-out still excludes self (see test_fanout_still_excludes_self).
+        seen = []
+        def fake_one(pid, msg, lane, session_name, wait, policy):
+            seen.append(pid)
+            return f"ok:{pid}"
         with mock.patch.object(roster, "roster",
                                return_value={"default": "", "alpha": ""}), \
-             mock.patch.object(roster, "self_profile", return_value="default"):
+             mock.patch.object(roster, "self_profile", return_value="default"), \
+             mock.patch.object(service, "_one", side_effect=fake_one):
             out = tools.b2b_call({"target": "default", "message": "hi"})
-        self.assertIn("bad_target", out)
+        self.assertEqual(seen, ["default"])          # reached, not dropped
+        self.assertNotIn("bad_target", out)
+
+    def test_fanout_still_excludes_self(self):
+        # '*' / 'all' must never message the caller itself (anti-loop). This is
+        # the only place self-exclusion still applies.
+        seen = self._fanout("*")
+        self.assertNotIn("default", seen)            # self excluded from broadcast
+        self.assertIn("alpha", seen)
+        self.assertIn("beta", seen)
 
     def _fanout(self, target):
         seen = []
@@ -209,6 +234,37 @@ class TestCallValidation(unittest.TestCase):
 
     def test_fanout_star_excludes_self(self):
         self.assertEqual(sorted(self._fanout("*")), ["alpha", "beta"])
+
+    def test_sender_is_threaded_into_the_signature(self):
+        # End-to-end attribution: an explicit sender must reach the signed
+        # message, and must NOT be overridden by ambient self_profile()
+        # (which under the multiplexer always reads 'default' — the bug).
+        captured = {}
+        def fake_one(pid, msg, lane, session_name, wait, policy):
+            captured["msg"] = msg
+            return "ok"
+        with mock.patch.object(roster, "roster",
+                               return_value={"default": "", "alpha": ""}), \
+             mock.patch.object(roster, "self_profile", return_value="default"), \
+             mock.patch.object(service, "_one", side_effect=fake_one):
+            tools.b2b_call({"target": "alpha", "message": "hi", "sender": "bravo"})
+        self.assertIn("bravo", captured["msg"])     # real sender present
+        self.assertNotIn("🤖 default", captured["msg"])  # ambient mask NOT used
+
+    def test_no_sender_falls_back_to_unnamed_not_default(self):
+        # With no explicit sender under the multiplexer, the signature must say
+        # 'a local bot', never falsely claim 'default'.
+        captured = {}
+        def fake_one(pid, msg, lane, session_name, wait, policy):
+            captured["msg"] = msg
+            return "ok"
+        with mock.patch.object(roster, "roster",
+                               return_value={"default": "", "alpha": ""}), \
+             mock.patch.object(roster, "self_profile", return_value="default"), \
+             mock.patch.object(service, "_one", side_effect=fake_one):
+            tools.b2b_call({"target": "alpha", "message": "hi"})
+        self.assertIn("a local bot", captured["msg"])
+        self.assertNotIn("🤖 default", captured["msg"])
 
     def test_comma_list_resolves(self):
         self.assertEqual(sorted(self._fanout("alpha, beta")), ["alpha", "beta"])

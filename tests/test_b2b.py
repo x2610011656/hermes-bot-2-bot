@@ -235,10 +235,11 @@ class TestCallValidation(unittest.TestCase):
     def test_fanout_star_excludes_self(self):
         self.assertEqual(sorted(self._fanout("*")), ["alpha", "beta"])
 
-    def test_sender_is_threaded_into_the_signature(self):
-        # End-to-end attribution: an explicit sender must reach the signed
-        # message, and must NOT be overridden by ambient self_profile()
-        # (which under the multiplexer always reads 'default' — the bug).
+    def test_caller_supplied_sender_is_ignored(self):
+        # Security: a caller must NOT be able to assert its identity. The old
+        # code trusted args['sender'], letting any bot impersonate another. Now
+        # the sender is resolved from trusted runtime context only; a passed
+        # sender='bravo' must NOT appear in the signature.
         captured = {}
         def fake_one(pid, msg, lane, session_name, wait, policy):
             captured["msg"] = msg
@@ -248,12 +249,12 @@ class TestCallValidation(unittest.TestCase):
              mock.patch.object(roster, "self_profile", return_value="default"), \
              mock.patch.object(service, "_one", side_effect=fake_one):
             tools.b2b_call({"target": "alpha", "message": "hi", "sender": "bravo"})
-        self.assertIn("bravo", captured["msg"])     # real sender present
-        self.assertNotIn("🤖 default", captured["msg"])  # ambient mask NOT used
+        self.assertNotIn("bravo", captured["msg"])   # spoof attempt ignored
+        self.assertNotIn("🤖 default", captured["msg"])
 
     def test_no_sender_falls_back_to_unnamed_not_default(self):
-        # With no explicit sender under the multiplexer, the signature must say
-        # 'a local bot', never falsely claim 'default'.
+        # With no trustworthy sender under the multiplexer, the signature must
+        # say 'a local bot', never falsely claim 'default'.
         captured = {}
         def fake_one(pid, msg, lane, session_name, wait, policy):
             captured["msg"] = msg
@@ -265,6 +266,20 @@ class TestCallValidation(unittest.TestCase):
             tools.b2b_call({"target": "alpha", "message": "hi"})
         self.assertIn("a local bot", captured["msg"])
         self.assertNotIn("🤖 default", captured["msg"])
+
+    def test_trusted_non_default_profile_is_used_as_sender(self):
+        # When the process genuinely runs under a named (non-default) profile,
+        # that identity is trustworthy and is used.
+        captured = {}
+        def fake_one(pid, msg, lane, session_name, wait, policy):
+            captured["msg"] = msg
+            return "ok"
+        with mock.patch.object(roster, "roster",
+                               return_value={"default": "", "alpha": ""}), \
+             mock.patch.object(roster, "self_profile", return_value="marnie"), \
+             mock.patch.object(service, "_one", side_effect=fake_one):
+            tools.b2b_call({"target": "alpha", "message": "hi"})
+        self.assertIn("marnie", captured["msg"])
 
     def test_comma_list_resolves(self):
         self.assertEqual(sorted(self._fanout("alpha, beta")), ["alpha", "beta"])

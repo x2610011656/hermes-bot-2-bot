@@ -25,28 +25,27 @@ def _guard(fn: Callable[[], str]) -> str:
         return err(Reason.SPAWN_FAILED, f"Unexpected failure: {exc}")
 
 
-def _true_sender(args: dict) -> str:
-    """Who is really making this call.
+def _trusted_sender() -> str:
+    """Who is really running this turn, from TRUSTED runtime context only.
 
-    Precedence:
-      1. An explicit ``sender`` arg — the only trustworthy source under the
-         multiplexed gateway, where every profile is served by one process whose
-         ambient home is 'default'.
-      2. ``roster.self_profile()`` — correct ONLY when this process is genuinely
-         running under a single named profile. Under the multiplexer this reads
-         'default' for every bot, which is the exact misattribution bug.
+    This replaces the old ``_true_sender`` which accepted a caller-supplied
+    ``sender``/``from`` argument as proof of identity. That was a spoofing hole:
+    any bot could pass sender='marnie' and the message would be attributed to
+    marnie. Identity is not something a caller gets to assert.
 
-    Returns '' when the sender cannot be determined honestly; callers then omit
-    attribution rather than assert a wrong one.
+    We resolve it from the one source that cannot be forged by the caller:
+    the profile this process is actually running under. Under the multiplexed
+    gateway that reads 'default' for every bot, which we CANNOT disambiguate —
+    so we return '' (unknown) rather than guess. Callers then label the message
+    'a local bot' / omit attribution instead of asserting a possibly-wrong name.
+
+    There is deliberately NO argument-based override. If a future Hermes version
+    exposes a trusted per-turn identity, resolve it here — never from args.
     """
-    explicit = str(args.get("sender") or args.get("from") or "").strip()
-    if explicit:
-        return explicit
-    # No explicit sender: only trust self_profile() when it is not the
-    # multiplexer's shared 'default' mask. If it resolves to 'default' but a
-    # real profile is running this turn, we cannot know which — so return ''
-    # and let the caller stay silent rather than mislabel.
     me = roster.self_profile()
+    # 'default' here means the multiplexer's shared mask, not a real identity:
+    # every profile's tool call resolves to it, so it proves nothing about who
+    # is actually calling. Return unknown rather than mislabel everyone 'default'.
     return "" if me == "default" else me
 
 
@@ -72,7 +71,7 @@ def b2b_call(args: dict) -> str:
         return service.call(
             target=raw_target, message=message, lane=lane,
             session_name=session_name,
-            sender=_true_sender(args),
+            sender=_trusted_sender(),
             wait=mode in ("wait", "block", "sync", "blocking"),
         )
     return _guard(run)
@@ -89,7 +88,7 @@ def b2b_send(args: dict) -> str:
         target=str(args.get("target") or args.get("bot") or "").strip(),
         channel=str(args.get("channel") or args.get("to") or "").strip(),
         message=str(args.get("message") or "").strip(),
-        sender=_true_sender(args),
+        sender=_trusted_sender(),
     ))
 
 
@@ -195,7 +194,6 @@ TOOLS: dict[str, tuple] = {
             "mode": {"type": "string", "enum": ["async", "wait"], "description": "'async' (default) = fire-and-forget, reply via notification. 'wait' = block and return the reply (cron/one-shot only)."},
             "session": {"type": "string", "enum": ["bot", "new", "existing"], "description": "Session lane. 'bot' (DEFAULT) = the target's Bot Chat. 'new' = a fresh session. 'existing' = a pre-existing session (the live one if open, else the named one)."},
             "session_name": {"type": "string", "description": "Session title for session='new' or session='existing'."},
-            "sender": {"type": "string", "description": "Your profile id, for correct attribution. Pass this so the recipient sees who really sent the message — under the shared gateway the sender cannot be detected automatically and would otherwise be left unnamed."},
         },
         ["target", "message"],
     ),
@@ -214,7 +212,6 @@ TOOLS: dict[str, tuple] = {
             "target": {"type": "string", "description": "Bot to send as: profile id, display name, or title."},
             "channel": {"type": "string", "description": "Destination, e.g. 'telegram:123456789'."},
             "message": {"type": "string", "description": "Message body."},
-            "sender": {"type": "string", "description": "Your profile id, for correct attribution (the message is labeled as coming from you, sent via the target bot)."},
         },
         ["target", "channel", "message"],
     ),
